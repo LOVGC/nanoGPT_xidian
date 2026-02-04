@@ -8,7 +8,7 @@ import random
 import time
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Sized, cast
 
 import torch
 from torch.utils.data import DataLoader, Dataset, IterableDataset, Subset
@@ -55,7 +55,7 @@ PRETRAIN_CONFIG = TrainingConfig(
     warmup_steps=200,
     weight_decay=0.1,
     grad_clip=1.0,
-    eval_interval=100,
+    eval_interval=20,
     eval_steps=50,
     sample_interval=100,
     max_new_tokens=120,
@@ -110,10 +110,10 @@ class TinyStoriesIterableDataset(IterableDataset):
 
     def _get_dataset(self):
         dataset = load_dataset(
-            "roneneldan/TinyStories", split=self.split, streaming=True
+            "roneneldan/TinyStories", split=self.split, streaming=False
         )
         if self.shuffle:
-            dataset = dataset.shuffle(buffer_size=self.buffer_size, seed=self.seed)
+            dataset = dataset.shuffle(seed=self.seed)
         return dataset
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
@@ -121,7 +121,7 @@ class TinyStoriesIterableDataset(IterableDataset):
             buffer: list[int] = []
             dataset = self._get_dataset()
             for sample in dataset:
-                text = sample.get("text")
+                text = sample.get("text") if isinstance(sample, dict) else None
                 if not text:
                     continue
                 tokens = self.enc.encode(text)
@@ -247,6 +247,32 @@ def build_dataloader(
         num_workers=0,
         pin_memory=torch.cuda.is_available(),
     )
+
+
+def estimate_pretrain_steps_per_epoch(
+    enc: tiktoken.Encoding,
+    block_size: int,
+    batch_size: int,
+) -> tuple[int, int, int]:
+    dataset = load_dataset("roneneldan/TinyStories", split="train", streaming=False)
+    total_tokens = 0
+    for sample in dataset:
+        text = sample.get("text") if isinstance(sample, dict) else None
+        if not text:
+            continue
+        total_tokens += len(enc.encode(text)) + 1
+    total_blocks = total_tokens // (block_size + 1)
+    steps_per_epoch = total_blocks // max(batch_size, 1)
+    return steps_per_epoch, total_blocks, total_tokens
+
+
+def print_epoch_estimate(max_steps: int, steps_per_epoch: int) -> None:
+    if steps_per_epoch <= 0:
+        print("Steps per epoch: 0 (cannot estimate epochs)")
+        return
+    epochs = max_steps / steps_per_epoch
+    print(f"Steps per epoch: {steps_per_epoch}")
+    print(f"Estimated epochs after max_steps: {epochs:.2f}")
 
 
 def build_sft_dataloaders(
@@ -490,7 +516,7 @@ def run_training(
             elapsed = time.time() - start_time
             avg_step_time = elapsed / max(step, 1)
             eta_seconds = (hp.max_steps - step) * avg_step_time
-            if not combined_eval_print:
+            if not combined_eval_print or step % hp.eval_interval != 0:
                 print(
                     f"step {step}/{hp.max_steps} | train_loss {latest_train_loss:.4f} | lr {lr:.2e} | ETA {format_eta(eta_seconds)}"
                 )
@@ -611,9 +637,16 @@ def run_pretrain(
     args: argparse.Namespace, hp: TrainingConfig, device: torch.device
 ) -> None:
     print("Training stage: pretrain")
-    print("Dataset: roneneldan/TinyStories (streaming)")
+    print("Dataset: roneneldan/TinyStories (non-streaming)")
     enc = tiktoken.get_encoding("gpt2")
     vocab_size = enc.n_vocab
+    print("Estimating pretrain epochs (tokenizing dataset once)...")
+    steps_per_epoch, total_blocks, total_tokens = estimate_pretrain_steps_per_epoch(
+        enc, hp.block_size, hp.batch_size
+    )
+    print(f"Total tokens: {total_tokens}")
+    print(f"Total blocks: {total_blocks}")
+    print_epoch_estimate(hp.max_steps, steps_per_epoch)
 
     model_args = model.ModelArgs(
         vocab_size=vocab_size,
@@ -692,7 +725,7 @@ def run_pretrain(
         best_name="best.pt",
         final_name="ckpt.pt",
         sample_prompt=PRETRAIN_SAMPLE_PROMPT,
-        combined_eval_print=False,
+        combined_eval_print=True,
     )
 
 
@@ -715,6 +748,12 @@ def run_sft(args: argparse.Namespace, hp: TrainingConfig, device: torch.device) 
         hp = replace(hp, block_size=block_size)
 
     train_loader, val_loader = build_sft_dataloaders(SFT_DATA_PATH, hp, seed=args.seed)
+    train_dataset = train_loader.dataset
+    train_size = (
+        len(cast(Sized, train_dataset)) if hasattr(train_dataset, "__len__") else 0
+    )
+    steps_per_epoch = train_size // max(hp.batch_size, 1)
+    print_epoch_estimate(hp.max_steps, steps_per_epoch)
 
     total_params = count_parameters(model_instance)
     print(f"Model parameters: {total_params}")
