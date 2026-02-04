@@ -48,40 +48,40 @@ class TrainingConfig:
 
 PRETRAIN_CONFIG = TrainingConfig(
     batch_size=32,
-    block_size=128,
+    block_size=128,  # 上下文长度 / context window length, in unit of tokens
     max_steps=5000,
     lr=1e-3,
     min_lr=1e-4,
     warmup_steps=200,
     weight_decay=0.1,
     grad_clip=1.0,
-    eval_interval=20,
-    eval_steps=50,
-    sample_interval=100,
-    max_new_tokens=120,
-    temperature=0.8,
-    top_k=50,
-    log_interval=20,
-    shuffle_buffer=10000,
+    eval_interval=20,  # 每隔多少 step 评估 / eval every N steps
+    eval_steps=20,  # eval_steps=0 means full validation set / 0 表示全量验证集
+    sample_interval=100,  # 每隔多少 step 生成样本 / sample every N steps
+    max_new_tokens=120,  # 单次生成最大 token 数 / max tokens to generate
+    temperature=0.8,  # 采样温度 / sampling temperature
+    top_k=50,  # top-k 采样范围 / sample from top-k tokens
+    log_interval=20,  # 训练日志频率 / log every N steps
+    shuffle_buffer=10000,  # shuffle 缓冲区 / shuffle buffer size
 )
 
 SFT_CONFIG = TrainingConfig(
     batch_size=32,
-    block_size=128,
+    block_size=128,  # 上下文长度 / context window length, in unit of tokens
     max_steps=100,  # number of weight updates
     lr=5e-5,
     min_lr=1e-5,
     warmup_steps=50,
     weight_decay=0.0,
     grad_clip=1.0,
-    eval_interval=10,  #  每训练 eval_interval 个 step 执行一次验证（evaluation）
-    eval_steps=50,  #  每次验证时，从验证集取 eval_steps 个 batch 计算平均验证损失（val loss）
-    sample_interval=200,  # 每训练 sample_interval 个 step，就会用当前模型生成一段示例输出（在 SFT 时就是指令模板的 sample，在 pretrain 时是 “Once upon a time …” 的续写）
-    max_new_tokens=120,
-    temperature=0.7,
-    top_k=50,
-    log_interval=20,
-    shuffle_buffer=1000,
+    eval_interval=10,  # 每隔多少 step 评估 / eval every N steps
+    eval_steps=0,  # eval_steps=0 means full validation set / 0 表示全量验证集
+    sample_interval=200,  # 每隔多少 step 生成样本 / sample every N steps
+    max_new_tokens=120,  # 单次生成最大 token 数 / max tokens to generate
+    temperature=0.7,  # 采样温度 / sampling temperature
+    top_k=50,  # top-k 采样范围 / sample from top-k tokens
+    log_interval=20,  # 训练日志频率 / log every N steps
+    shuffle_buffer=1000,  # shuffle 缓冲区 / shuffle buffer size
 )
 
 
@@ -230,6 +230,7 @@ def build_dataloader(
     shuffle: bool,
     buffer_size: int,
     repeat: bool,
+    drop_last: bool = True,
 ) -> DataLoader:
     dataset = TinyStoriesIterableDataset(
         split=split,
@@ -243,7 +244,7 @@ def build_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        drop_last=True,
+        drop_last=drop_last,
         num_workers=0,
         pin_memory=torch.cuda.is_available(),
     )
@@ -405,15 +406,21 @@ def evaluate(
 ) -> float:
     model_instance.eval()
     losses = []
-    data_iter = iter(data_loader)
-    for _ in range(eval_steps):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            break
-        x, y, attention_mask = prepare_batch(batch, device)
-        _, loss = model_instance(x, attention_mask=attention_mask, labels=y)
-        losses.append(loss.item())
+    if eval_steps == 0:
+        for batch in data_loader:
+            x, y, attention_mask = prepare_batch(batch, device)
+            _, loss = model_instance(x, attention_mask=attention_mask, labels=y)
+            losses.append(loss.item())
+    else:
+        data_iter = iter(data_loader)
+        for _ in range(eval_steps):
+            try:
+                batch = next(data_iter)
+            except StopIteration:
+                break
+            x, y, attention_mask = prepare_batch(batch, device)
+            _, loss = model_instance(x, attention_mask=attention_mask, labels=y)
+            losses.append(loss.item())
     model_instance.train()
     if not losses:
         return float("nan")
@@ -689,6 +696,7 @@ def run_pretrain(
         shuffle=True,
         buffer_size=hp.shuffle_buffer,
         repeat=True,
+        drop_last=True,
     )
     try:
         val_loader = build_dataloader(
@@ -699,6 +707,7 @@ def run_pretrain(
             shuffle=False,
             buffer_size=hp.shuffle_buffer,
             repeat=False,
+            drop_last=False,
         )
     except Exception:
         print("validation split unavailable, falling back to train split for eval")
@@ -710,6 +719,7 @@ def run_pretrain(
             shuffle=False,
             buffer_size=hp.shuffle_buffer,
             repeat=False,
+            drop_last=False,
         )
 
     run_training(
