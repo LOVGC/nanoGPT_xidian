@@ -74,7 +74,7 @@ def main() -> None:
     top_k = 50
 
     samples = [
-        {"instruction": "", "input": "Once upon a time"},
+        {"instruction": "翻译成英文", "input":"你好"},
         {"instruction": "计算下列表达式", "input": "34 - 1"},
         {"instruction": "回答问题", "input": "What is the capital of France?"},
     ]
