@@ -19,7 +19,7 @@ import tiktoken
 import model
 
 
-SFT_DATA_PATH = Path("data") / "sft_data.jsonl"
+SFT_DATA_PATH = Path("data") / "sft_data_en.jsonl"
 PRETRAIN_LOG_NAME = "pretrain_loss.csv"
 SFT_LOG_NAME = "sft_loss.csv"
 PRETRAIN_SAMPLE_PROMPT = "Once upon a time"
@@ -49,7 +49,7 @@ class TrainingConfig:
 PRETRAIN_CONFIG = TrainingConfig(
     batch_size=32,
     block_size=128,
-    max_steps=2000,
+    max_steps=5000,
     lr=1e-3,
     min_lr=1e-4,
     warmup_steps=200,
@@ -66,17 +66,17 @@ PRETRAIN_CONFIG = TrainingConfig(
 )
 
 SFT_CONFIG = TrainingConfig(
-    batch_size=16,
+    batch_size=32,
     block_size=128,
-    max_steps=200, # number of weight updates
+    max_steps=200,  # number of weight updates
     lr=5e-5,
     min_lr=1e-5,
     warmup_steps=50,
     weight_decay=0.0,
     grad_clip=1.0,
-    eval_interval=100,
-    eval_steps=20,
-    sample_interval=200,
+    eval_interval=10,  #  每训练 eval_interval 个 step 执行一次验证（evaluation）
+    eval_steps=50,  #  每次验证时，从验证集取 eval_steps 个 batch 计算平均验证损失（val loss）
+    sample_interval=200,  # 每训练 sample_interval 个 step，就会用当前模型生成一段示例输出（在 SFT 时就是指令模板的 sample，在 pretrain 时是 “Once upon a time …” 的续写）
     max_new_tokens=120,
     temperature=0.7,
     top_k=50,
@@ -451,6 +451,7 @@ def run_training(
     best_name: str,
     final_name: str,
     sample_prompt: str,
+    combined_eval_print: bool = False,
 ) -> None:
     optimizer = torch.optim.AdamW(
         model_instance.parameters(),
@@ -462,6 +463,7 @@ def run_training(
     start_time = time.time()
     train_iter = iter(train_loader)
     best_eval_loss = float("inf")
+    latest_train_loss = float("nan")
 
     for step in range(1, hp.max_steps + 1):
         try:
@@ -477,6 +479,7 @@ def run_training(
             group["lr"] = lr
 
         _, loss = model_instance(x, attention_mask=attention_mask, labels=y)
+        latest_train_loss = loss.item()
         loss.backward()
         if hp.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model_instance.parameters(), hp.grad_clip)
@@ -487,14 +490,15 @@ def run_training(
             elapsed = time.time() - start_time
             avg_step_time = elapsed / max(step, 1)
             eta_seconds = (hp.max_steps - step) * avg_step_time
-            print(
-                f"step {step}/{hp.max_steps} | train_loss {loss.item():.4f} | lr {lr:.2e} | ETA {format_eta(eta_seconds)}"
-            )
+            if not combined_eval_print:
+                print(
+                    f"step {step}/{hp.max_steps} | train_loss {latest_train_loss:.4f} | lr {lr:.2e} | ETA {format_eta(eta_seconds)}"
+                )
             append_log(
                 log_path,
                 step,
                 "train",
-                loss.item(),
+                latest_train_loss,
                 lr,
                 eta_seconds,
                 elapsed,
@@ -505,9 +509,22 @@ def run_training(
             elapsed = time.time() - start_time
             avg_step_time = elapsed / max(step, 1)
             eta_seconds = (hp.max_steps - step) * avg_step_time
-            print(
-                f"eval loss at step {step}: {val_loss:.4f} | lr {lr:.2e} | ETA {format_eta(eta_seconds)}"
-            )
+            if combined_eval_print:
+                print(
+                    "step {step}/{total} | train_loss {train:.4f} | val_loss {val:.4f} "
+                    "| lr {lr:.2e} | ETA {eta}".format(
+                        step=step,
+                        total=hp.max_steps,
+                        train=latest_train_loss,
+                        val=val_loss,
+                        lr=lr,
+                        eta=format_eta(eta_seconds),
+                    )
+                )
+            else:
+                print(
+                    f"eval loss at step {step}: {val_loss:.4f} | lr {lr:.2e} | ETA {format_eta(eta_seconds)}"
+                )
             append_log(
                 log_path,
                 step,
@@ -593,6 +610,8 @@ def parse_args() -> argparse.Namespace:
 def run_pretrain(
     args: argparse.Namespace, hp: TrainingConfig, device: torch.device
 ) -> None:
+    print("Training stage: pretrain")
+    print("Dataset: roneneldan/TinyStories (streaming)")
     enc = tiktoken.get_encoding("gpt2")
     vocab_size = enc.n_vocab
 
@@ -673,10 +692,13 @@ def run_pretrain(
         best_name="best.pt",
         final_name="ckpt.pt",
         sample_prompt=PRETRAIN_SAMPLE_PROMPT,
+        combined_eval_print=False,
     )
 
 
 def run_sft(args: argparse.Namespace, hp: TrainingConfig, device: torch.device) -> None:
+    print("Training stage: sft")
+    print(f"Dataset: {SFT_DATA_PATH}")
     enc = tiktoken.get_encoding("gpt2")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -711,6 +733,7 @@ def run_sft(args: argparse.Namespace, hp: TrainingConfig, device: torch.device) 
         best_name="sft_best.pt",
         final_name="sft_ckpt.pt",
         sample_prompt=SFT_SAMPLE_PROMPT,
+        combined_eval_print=True,
     )
 
 
