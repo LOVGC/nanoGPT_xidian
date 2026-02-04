@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import json
+import random
 
 import torch
 import tiktoken
@@ -13,13 +15,15 @@ import model
 
 
 def format_sft_prompt(instruction: str, input_text: str) -> str:
-    return (
-        "### Instruction:\n"
-        + instruction
-        + "\n### Input:\n"
-        + input_text
-        + "\n### Response:\n"
-    )
+    if input_text:
+        return (
+            "### Instruction:\n"
+            + instruction
+            + "\n### Input:\n"
+            + input_text
+            + "\n### Response:\n"
+        )
+    return "### Instruction:\n" + instruction + "\n### Response:\n"
 
 
 def generate_sample(
@@ -29,12 +33,21 @@ def generate_sample(
     block_size: int,
     temperature: float,
     top_k: int,
+    eot_id: int,
+    newline_ids: list[int],
+    min_tokens_before_eot: int,
 ) -> torch.Tensor:
-    for _ in range(max_new_tokens):
+    for step in range(max_new_tokens):
         input_cond = input_ids[:, -block_size:]
         logits = model_instance(input_cond)
         logits = logits[:, -1, :]
         logits = logits / max(temperature, 1e-6)
+        if step < min_tokens_before_eot and 0 <= eot_id < logits.shape[-1]:
+            logits[:, eot_id] = -float("inf")
+        if step < min_tokens_before_eot and newline_ids:
+            for token_id in newline_ids:
+                if 0 <= token_id < logits.shape[-1]:
+                    logits[:, token_id] = -float("inf")
         if top_k > 0:
             values, _ = torch.topk(logits, top_k)
             min_values = values[:, -1].unsqueeze(-1)
@@ -51,7 +64,30 @@ def decode_response(enc: tiktoken.Encoding, response_ids: list[int]) -> str:
     eot_id = enc.eot_token
     if eot_id in response_ids:
         response_ids = response_ids[: response_ids.index(eot_id)]
-    return enc.decode(response_ids).strip()
+    return enc.decode(response_ids)
+
+
+def load_sft_samples(data_path: Path, count: int, seed: int) -> list[dict[str, str]]:
+    if not data_path.exists():
+        raise FileNotFoundError(f"missing SFT data: {data_path}")
+
+    with data_path.open("r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    filtered = []
+    for record in records:
+        instruction = record.get("instruction", "").strip()
+        output_text = record.get("output", "").strip()
+        if not instruction or not output_text:
+            continue
+        filtered.append(record)
+
+    if len(filtered) <= count:
+        return filtered
+
+    rng = random.Random(seed)
+    rng.shuffle(filtered)
+    return filtered[:count]
 
 
 def main() -> None:
@@ -72,15 +108,16 @@ def main() -> None:
     block_size = model_args.max_seq_len
     temperature = 0.7
     top_k = 50
-
-    samples = [
-        {"instruction": "翻译成英文", "input":"你好"},
-        {"instruction": "计算下列表达式", "input": "34 - 1"},
-        {"instruction": "回答问题", "input": "What is the capital of France?"},
-    ]
+    min_tokens_before_eot = 5
+    newline_ids = enc.encode("\n")
+    samples = load_sft_samples(ROOT / "data" / "sft_data_en.jsonl", count=3, seed=42)
 
     for idx, sample in enumerate(samples, start=1):
-        prompt = format_sft_prompt(sample["instruction"], sample["input"])
+        instruction = sample.get("instruction", "").strip()
+        input_text = sample.get("input", "").strip()
+        expected_output = sample.get("output", "").strip()
+
+        prompt = format_sft_prompt(instruction, input_text)
         print(f"=== SAMPLE {idx} PROMPT ===")
         print(prompt)
 
@@ -90,6 +127,14 @@ def main() -> None:
         )
 
         with torch.no_grad():
+            logits = model_instance(input_ids)
+            next_logits = logits[:, -1, :] / max(temperature, 1e-6)
+            top_values, top_indices = torch.topk(next_logits, k=5, dim=-1)
+            print(f"=== SAMPLE {idx} TOP-5 TOKENS ===")
+            for score, token_id in zip(top_values[0].tolist(), top_indices[0].tolist()):
+                token_text = enc.decode([token_id])
+                print(f"{token_id}: {repr(token_text)} ({score:.4f})")
+
             output_ids = generate_sample(
                 model_instance,
                 input_ids,
@@ -97,13 +142,20 @@ def main() -> None:
                 block_size=block_size,
                 temperature=temperature,
                 top_k=top_k,
+                eot_id=enc.eot_token,
+                newline_ids=newline_ids,
+                min_tokens_before_eot=min_tokens_before_eot,
             )
 
         response_ids = output_ids[0, len(prompt_ids) :].tolist()
         response_text = decode_response(enc, response_ids)
 
+        print(f"=== SAMPLE {idx} EXPECTED ===")
+        print(expected_output)
         print(f"=== SAMPLE {idx} OUTPUT ===")
         print(response_text)
+        print(f"=== SAMPLE {idx} OUTPUT (repr) ===")
+        print(repr(response_text))
         print("=== END ===\n")
 
 
