@@ -188,11 +188,17 @@ def quantize_and_report(
 
     fp32_size = file_size(fp32_out)
     int8_size = file_size(int8_out)
+    ckpt_size = file_size(checkpoint_path)
     if int8_size > 0:
-        ratio = fp32_size / int8_size
-        print(f"FP32 weights size: {fp32_size} bytes")
-        print(f"INT8 weights size: {int8_size} bytes")
-        print(f"Compression ratio: {ratio:.2f}x")
+        if ckpt_size > 0:
+            ratio_ckpt = ckpt_size / int8_size
+            print(f"Checkpoint size: {ckpt_size} bytes")
+            print(f"Compression ratio (ckpt vs int8): {ratio_ckpt:.2f}x")
+        if fp32_size > 0:
+            ratio_weights = fp32_size / int8_size
+            print(f"FP32 weights size: {fp32_size} bytes")
+            print(f"INT8 weights size: {int8_size} bytes")
+            print(f"Compression ratio (weights vs int8): {ratio_weights:.2f}x")
 
     enc = tiktoken.get_encoding("gpt2")
     sample = generate_sample(

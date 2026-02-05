@@ -106,8 +106,8 @@ def main() -> None:
 
     max_new_tokens = 128
     block_size = model_args.max_seq_len
-    temperature = 0.7
-    top_k = 50
+    temperature = 0.5  # 0.7
+    top_k = 50  # 50
     min_tokens_before_eot = 5
     newline_ids = enc.encode("\n")
     samples = load_sft_samples(ROOT / "data" / "sft_data_en.jsonl", count=3, seed=42)
