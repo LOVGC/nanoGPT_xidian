@@ -115,8 +115,6 @@ def main() -> None:
     for idx, sample in enumerate(samples, start=1):
         instruction = sample.get("instruction", "").strip()
         input_text = sample.get("input", "").strip()
-        expected_output = sample.get("output", "").strip()
-
         prompt = format_sft_prompt(instruction, input_text)
         print(f"=== SAMPLE {idx} PROMPT ===")
         print(prompt)
@@ -127,14 +125,6 @@ def main() -> None:
         )
 
         with torch.no_grad():
-            logits = model_instance(input_ids)
-            next_logits = logits[:, -1, :] / max(temperature, 1e-6)
-            top_values, top_indices = torch.topk(next_logits, k=5, dim=-1)
-            print(f"=== SAMPLE {idx} TOP-5 TOKENS ===")
-            for score, token_id in zip(top_values[0].tolist(), top_indices[0].tolist()):
-                token_text = enc.decode([token_id])
-                print(f"{token_id}: {repr(token_text)} ({score:.4f})")
-
             output_ids = generate_sample(
                 model_instance,
                 input_ids,
@@ -150,11 +140,42 @@ def main() -> None:
         response_ids = output_ids[0, len(prompt_ids) :].tolist()
         response_text = decode_response(enc, response_ids)
 
-        print(f"=== SAMPLE {idx} EXPECTED ===")
-        print(expected_output)
-        print(f"=== SAMPLE {idx} OUTPUT ===")
-        print(response_text)
         print(f"=== SAMPLE {idx} OUTPUT (repr) ===")
+        print(repr(response_text))
+        print("=== END ===\n")
+
+    story_prompts = [
+        "Once upon a time",
+        "In a small village",
+        "There was a curious fox",
+    ]
+
+    for idx, prompt in enumerate(story_prompts, start=1):
+        print(f"=== STORY SAMPLE {idx} PROMPT ===")
+        print(prompt)
+
+        prompt_ids = enc.encode(prompt)
+        input_ids = torch.tensor(prompt_ids, dtype=torch.long, device=device).unsqueeze(
+            0
+        )
+
+        with torch.no_grad():
+            output_ids = generate_sample(
+                model_instance,
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                block_size=block_size,
+                temperature=temperature,
+                top_k=top_k,
+                eot_id=enc.eot_token,
+                newline_ids=newline_ids,
+                min_tokens_before_eot=min_tokens_before_eot,
+            )
+
+        response_ids = output_ids[0, len(prompt_ids) :].tolist()
+        response_text = decode_response(enc, response_ids)
+
+        print(f"=== STORY SAMPLE {idx} OUTPUT (repr) ===")
         print(repr(response_text))
         print("=== END ===\n")
 
