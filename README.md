@@ -61,6 +61,42 @@ Pretrain samples (story continuation):
 uv run python tests/test_pretrain_samples.py
 ```
 
+## Quantization
+
+Run dynamic quantization (W8A16, `nn.Linear` only):
+```bash
+uv run python quantize.py
+```
+
+Outputs:
+- Quantized weights: `model_trained/best_int8.pt`, `model_trained/sft_best_int8.pt`
+- FP32 weights-only snapshots: `model_trained/best_fp32_weights.pt`, `model_trained/sft_best_fp32_weights.pt`
+
+Reports:
+- FP32 vs INT8 loss/PPL
+- Compression ratio (ckpt vs int8) and (weights vs int8)
+
+Notes:
+- Quantization runs on CPU and uses full validation by default (`eval_steps=0`).
+
+## RAG Inference
+
+Prepare your knowledge base under `data/knowledge_base/` and build the index:
+
+Local backend (your SFT model):
+```bash
+uv run --python 3.13 python inference.py --backend local --docs_dir data/knowledge_base --index_dir rag_index --rebuild
+```
+
+Ollama backend (local model via Ollama):
+```bash
+uv run --python 3.13 python inference.py --backend ollama --ollama_model qwen3:4b --ollama_base_url http://localhost:11434 --docs_dir data/knowledge_base --index_dir rag_index --rebuild
+```
+
+Notes:
+- Ollama must be running and the model pulled (e.g. `ollama pull qwen3:4b`).
+- Chroma + onnxruntime require Python 3.13 on Windows; use `--python 3.13` when running RAG.
+
 ## Notes on Hyperparameters
 
 Key controls in `train.py`:
