@@ -1,0 +1,147 @@
+\documentclass[11pt]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{hyperref}
+
+\geometry{a4paper, margin=1in}
+\graphicspath{{./}}
+
+\title{NanoGPT-Edge 项目报告}
+\author{张三（学号：123）}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{项目概述}
+本项目从零实现一个小于 50M 参数的 Decoder-only Transformer，并完成 MoE、SFT、量化（PTQ）与 RAG 全流程。目标是在端侧可部署的前提下，提升指令跟随能力并减少“幻觉”。
+
+\section{模型架构与设计分析}
+\subsection{整体架构}
+模型采用 Decoder-only Transformer。核心组件包括：RMSNorm、RoPE、SwiGLU 以及 MoE（Top-2 Router）。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{Architecture.png}
+\caption{模型整体架构示意图}
+\end{figure}
+
+\subsection{MoE 路由机制}
+在 Transformer Block 的 FFN 位置替换为 MoE，Router 采用 Top-2 路由，在提高模型容量的同时保持推理代价可控。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\linewidth]{MoE.png}
+\caption{MoE 路由结构示意图}
+\end{figure}
+
+\section{Pre-training 训练分析}
+\subsection{数据与目标}
+预训练数据集使用 \texttt{roneneldan/TinyStories}，该数据集为纯英文，适合小模型快速收敛。训练目标为 Next Token Prediction（交叉熵）。
+
+\subsection{训练曲线与收敛性}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{pretrain_loss.png}
+\caption{Pretrain Loss 曲线}
+\end{figure}
+
+\textbf{分析：} Loss 下降趋势明显，模型已学到基础语法与句法结构。给定 "Once upon a time" 能生成连贯故事，满足预训练验收标准。
+
+\section{SFT 训练分析}
+\subsection{数据与目标}
+SFT 数据集使用英文指令数据（Alpaca + Dolly + SQuAD + SQuAD-v2），目标是将模型从“故事续写”转为“指令跟随”。
+
+\subsection{训练曲线}
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{sft_loss.png}
+\caption{SFT Loss 曲线}
+\end{figure}
+
+\textbf{分析：} SFT Loss 很快下降并趋近极低，但生成质量并未同步提升，这是典型的 teacher-forcing 与 free-run mismatch。训练阶段模型在“正确前缀”下预测良好，但生成时首 token 偏离会迅速发散。
+
+\subsection{SFT 失败原因分析（重点）}
+\begin{itemize}
+\item \textbf{训练过多 / Loss 过低导致“学傻”}：训练步数过多，模型过拟合小样本指令，原有语言建模能力退化（catastrophic forgetting）。
+\item \textbf{学习率过大 + 训练太久}：SFT 是“微调”，学习率不宜过大，否则容易冲掉预训练知识。
+\item \textbf{数据量太小}：小数据情况下不宜训练太猛，否则过拟合与遗忘被放大。
+\item \textbf{语言分布偏移}：预训练为纯英文，fine-tune 混入中文会显著恶化表现。
+\item \textbf{验证建议}：可在 SFT 后回测预训练集 PPL，量化遗忘程度。
+\end{itemize}
+
+\section{MoE 专家负载可视化与分析}
+统计推理过程中各专家被选中频率，观察是否存在“专家坍缩”现象。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{moe_expert_load.png}
+\caption{各层专家负载热力图（Top-2 选择比例）}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.8\linewidth]{moe_expert_load_overall.png}
+\caption{专家整体负载分布}
+\end{figure}
+
+\textbf{分析：} 深层专家负载明显不均衡，出现坍缩趋势。建议引入 Load Balancing Loss 或路由噪声进行缓解。
+
+\section{模型量化报告}
+量化方案采用 \texttt{torch.quantization.quantize\_dynamic}，仅对 \texttt{nn.Linear} 量化（W8A16）。
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lccccccccc}
+\toprule
+Model & FP32 size & INT8 size & Ratio(ckpt) & Ratio(weights) & FP32 PPL & INT8 PPL & $\Delta$PPL & FP32 latency & INT8 latency \\
+\midrule
+sft & 560.34 MB & 108.75 MB & 5.15x & 1.74x & 8.7782 & 8.6860 & -1.05\% & 1.698s & 1.464s \\
+\bottomrule
+\end{tabular}
+\caption{FP32 vs INT8 大小、PPL、延迟对比表}
+\end{table}
+
+\textbf{分析：}
+\begin{itemize}
+\item 量化后 PPL 变化极小，精度基本保持；
+\item 体积压缩明显，但对“权重-only”压缩比仅约 1.74x，原因是 embedding 等未量化；
+\item CPU 推理延迟略有改善，符合动态量化预期。
+\end{itemize}
+
+\section{RAG Case Study}
+使用本地知识库，采用 Ollama（qwen3:4b）进行 RAG 对比测试。
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{lXX}
+\toprule
+Question & RAG OFF & RAG ON \\
+\midrule
+What is my student ID? & I don't know. & 123 \\
+Where do I study? & I don't know. & I don't know. \\
+What is my favorite topic? & I don't know. & My favorite topic is RAG. \\
+\bottomrule
+\end{tabularx}
+\caption{RAG 开启前后回答对比}
+\end{table}
+
+\textbf{分析：} RAG 开启后能基于知识库回答事实性问题，但仍受检索召回与上下文截断影响。
+
+\section{心得体会（润色版）}
+\begin{itemize}
+\item \textbf{SFT 不宜使用较长 warmup}：微调应当快速有效，长 warmup 对小数据不友好。
+\item \textbf{SFT 的精髓是“微调”}：小样本 + 小学习率 + 少 epoch，避免大幅重塑模型分布。
+\item \textbf{预训练 OK，微调容易跪}：学习率过大或训练过久会导致 catastrophic forgetting。
+\item \textbf{语言分布一致性很关键}：预训练为纯英文，fine-tune 若混入中文会显著恶化表现。
+\item \textbf{训练大模型非常不容易}：需要大量经验与反复实验去平衡收敛、泛化与遗忘。
+\end{itemize}
+
+\section{总结}
+本项目完成了从架构实现、预训练、SFT、量化到 RAG 的完整流程，并提供了训练曲线、MoE 负载可视化、量化对比与 RAG Case Study 结果。虽然 SFT 表现仍有不足，但关键模块均已实现并可复现，为后续优化提供了基础。
+
+\end{document}
